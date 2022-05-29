@@ -4,6 +4,8 @@
 #include <ArduinoJson.h>
 
 
+const char* ap_ssid     = "Pluviometer-AP";
+
 struct {
   struct {
     char ssid[32]            = "";
@@ -50,7 +52,7 @@ void initializeConfiguration(){
 
     data.offset=0;
     data.magick_number=123456.789;
-    data.value=0.0;
+    data.ticks=0;
     
     EEPROM.put(0, data);
     EEPROM.commit();  
