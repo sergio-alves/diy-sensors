@@ -8,6 +8,10 @@
 const char* ap_ssid     = "Pluviometer-AP";
 
 struct {
+   
+}measure;
+
+struct {
   struct {
     char ssid[32]            = "";
     char password[16]        = "";  
@@ -222,7 +226,7 @@ void transmitToMQTT() {
     DynamicJsonDocument doc(1024);
     doc["ticks"]=data.ticks;
     doc["mm_per_sqm"]=BUCKET_VOLUME_PER_TICK * SQARE_METER_IN_SQUARE_CENTIMETERS / COLLECTOR_SURFACE;
-    doc["rain_start"]=
+    client.publish(data.mqtt.out_topic, doc.toString());
 }
 
 void loop() {
