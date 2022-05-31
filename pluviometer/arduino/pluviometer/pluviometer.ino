@@ -5,10 +5,14 @@
 #include <ArduinoJson.h>
 #include <WiFiUdp.h>
 
+
+#define MAGICK_NUMBER 1234.56789
 const char* ap_ssid     = "Pluviometer-AP";
 
 struct {
-   
+  time_t startRain;
+  time_t measureDate;
+  long ticks;
 }measure;
 
 struct {
@@ -19,6 +23,7 @@ struct {
   
   struct {
     char ip[16]              = "";
+    char url[32]             = "";
     int port                 = 0;
     char username[16]        = "";
     char password[16]        = "";
@@ -29,6 +34,7 @@ struct {
   double offset              = 0.0;
   long ticks                 = 0;
   double magick_number       = 0;
+  boolean is_raining         = false;
 } data;
 
 
@@ -36,7 +42,6 @@ WiFiClient espClient;
 PubSubClient client;
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP);
-
 
 /**
  * Initializes the global configuration stored in EEPROM
@@ -47,10 +52,12 @@ void initializeConfiguration(){
             
     memset(&data,'\0', sizeof(data));
     
-    strncpy(&(data.wifi.ssid[0]), "local_ssid", 32);
-    strncpy(&(data.wifi.password[0]), "local_password", 16);
+    strncpy(&(data.wifi.ssid[0]), "ssid", 32);
+    strncpy(&(data.wifi.password[0]), "ssid_password", 16);
 
-    strncpy(&(data.mqtt.ip[0]), "127.0.0.1", 16);
+    strncpy(&(data.mqtt.url[0]), "mqtt.mydomain.local", 32);
+    strncpy(&(data.mqtt.ip[0]), "www.xxx.yyy.zzz", 16);
+    
     data.mqtt.port=1883;
     
     strncpy(&(data.mqtt.username[0]), "mqtt_username", 16);
@@ -59,7 +66,7 @@ void initializeConfiguration(){
     strncpy(&(data.mqtt.out_topic[0]), "sensors/out/pluviometer", 64);
 
     data.offset=0;
-    data.magick_number=123456.789;
+    data.magick_number=MAGICK_NUMBER;
     data.ticks=0;
     
     EEPROM.put(0, data);
@@ -133,7 +140,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
       strncpy(&(data.mqtt.out_topic[0]),doc["setup"]["mqtt"]["out_topic"] , 64);
     }
 
-    data.magick_number=123456.789;
+    data.magick_number=MAGICK_NUMBER;
     
     /* persist changes to the flash */
     EEPROM.put(0, data);    
@@ -145,12 +152,41 @@ void callback(char* topic, byte* payload, unsigned int length) {
 }
 
 /**
+ * Attempt to reconnect to mqtt server. 
+ */
+void reconnectMqtt() {
+  // Loop until we're reconnected
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    // Create a random client ID
+    String clientId = "ESP8266Client-";
+    clientId += String(random(0xffff), HEX);
+    // Attempt to connect
+    if (client.connect(clientId.c_str(), &(data.mqtt.username[0]), &(data.mqtt.password[0]))) {
+      Serial.println("connected");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+      delay(5000);
+    }
+  }
+}
+
+/**
  * Setup MQTT client
  */
 void setup_mqtt_client() {
     client.setClient(espClient);
+
+    Serial.print("Connecting to the mqtt: ");
+    Serial.print(data.mqtt.url);
+    Serial.print(" and port ");
+    Serial.println(data.mqtt.port);
+    
     client.setServer(&(data.mqtt.ip[0]), data.mqtt.port);
-    client.setCallback(callback);
+    client.setCallback(callback);    
     client.subscribe(&(data.mqtt.in_topic[0]));    
 }
 
@@ -172,7 +208,7 @@ void setup() {
   EEPROM.get(0,data);
 
   // check if flash is empty. if true create and store a brand new module configuration
-  if(data.magick_number!=123456.789) {
+  if(data.magick_number!=MAGICK_NUMBER) {
     initializeConfiguration();
   }
 
@@ -185,31 +221,6 @@ void setup() {
   setup_mqtt_client();
 }
 
-/**
- * Attempt to reconnect to mqtt server. 
- */
-void reconnectMqtt() {
-  // Loop until we're reconnected
-  while (!client.connected()) {
-    Serial.print("Attempting MQTT connection...");
-    // Create a random client ID
-    String clientId = "ESP8266Client-";
-    clientId += String(random(0xffff), HEX);
-    // Attempt to connect
-    if (client.connect(clientId.c_str())) {
-      Serial.println("connected");
-      // Once connected, publish an announcement...
-      client.publish(data.mqtt.out_topic, "{\"status\":\"online\"}");
-      client.subscribe(data.mqtt.in_topic);
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" try again in 5 seconds");
-      // Wait 5 seconds before retrying
-      delay(5000);
-    }
-  }
-}
 
 /* PI * 5^2 cm */
 #define COLLECTOR_SURFACE 78,539816339744830961566084581988
@@ -223,27 +234,66 @@ void reconnectMqtt() {
  */
 void transmitToMQTT() {
     /* calculates the mm/L per square meter equivalent */
-    DynamicJsonDocument doc(1024);
+    DynamicJsonDocument doc(64);
     doc["ticks"]=data.ticks;
     doc["mm_per_sqm"]=BUCKET_VOLUME_PER_TICK * SQARE_METER_IN_SQUARE_CENTIMETERS / COLLECTOR_SURFACE;
-    client.publish(data.mqtt.out_topic, doc.toString());
+    doc["timestamp"]=timeClient.getEpochTime();
+    doc["status"]="online";
+    doc["raining"]=data.is_raining;
+    
+    String serializedJson = "";
+    serializeJson(doc, serializedJson);
+
+    if (!client.connected()) {
+      reconnectMqtt();
+    }
+
+    Serial.print("Going to send data to mqtt on topic :  ");
+    Serial.println(&(data.mqtt.out_topic[0]));
+    serializeJson(doc, Serial);   
+    Serial.println();
+    client.publish(&(data.mqtt.out_topic[0]), serializedJson.c_str(), true);
 }
 
-void loop() {
-  // mqtt get messages
-  if (!client.connected()) {
-    reconnect();
-  }
-  client.loop();
+/**
+ * Gets current date time formatted 
+ */
+String getFullyFormattedDateTimeUTC() {
+
+  time_t epochTime = timeClient.getEpochTime();
+  struct tm *ptm = gmtime ((time_t *)&epochTime);  
   
-  timeClient.update();
+  int monthDay = ptm->tm_mday;
+  int currentMonth = ptm->tm_mon+1;
+  int currentYear = ptm->tm_year+1900;
+  
+  //Print complete date:
+  return String(monthDay) + "/" + String(currentMonth) + "/" + String(currentYear) + " " + timeClient.getFormattedTime();
+}
+
+/**
+ * The main loop
+ */
+void loop() {
+  timeClient.update();  
+  
+  //Get a time structure  
+  Serial.println(getFullyFormattedDateTimeUTC());
   
   // increment the tickets and store into eeprom
   data.ticks++;
   saveDataAndConfiguration();
 
+  // mqtt get messages
+  if (!client.connected()) {
+    reconnectMqtt();
+    Serial.println("Connection done");
+  }   
+
   // transmit data to mqtt
   transmitToMQTT();
+
+  client.loop();
   
   // Deep sleep mode for 30 seconds, the ESP8266 wakes up by itself when GPIO 16 (D0 in NodeMCU board) is connected to the RESET pin
   Serial.println("I'm awake, but I'm going into deep sleep mode for 30 seconds");
