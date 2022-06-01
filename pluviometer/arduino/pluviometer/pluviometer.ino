@@ -6,8 +6,21 @@
 #include <WiFiUdp.h>
 
 
-#define MAGICK_NUMBER 1234.56789
+#define MAGICK_NUMBER 123456.789
 const char* ap_ssid     = "Pluviometer-AP";
+const int analogInPin = A0;  // ESP8266 Analog Pin ADC0 = A0
+const int rainStarted = D4; 
+int voltage = 0;  // value read from the pot
+
+
+/** module muste restart   
+ *  
+ *  each day to communicate battery level
+ *  when rain starts ( rain start detected and no rain period running) 
+ *  when bucket moved because full of rain
+ *  
+ */
+
 
 struct {
   time_t startRain;
@@ -52,16 +65,16 @@ void initializeConfiguration(){
             
     memset(&data,'\0', sizeof(data));
     
-    strncpy(&(data.wifi.ssid[0]), "ssid", 32);
-    strncpy(&(data.wifi.password[0]), "ssid_password", 16);
+    strncpy(&(data.wifi.ssid[0]), "wifi.ssid", 32);
+    strncpy(&(data.wifi.password[0]), "wifi.password", 16);
 
-    strncpy(&(data.mqtt.url[0]), "mqtt.mydomain.local", 32);
-    strncpy(&(data.mqtt.ip[0]), "www.xxx.yyy.zzz", 16);
+    strncpy(&(data.mqtt.url[0]), "mqtt.localhost", 32);
+    strncpy(&(data.mqtt.ip[0]), "xxx.yyy.zzz.146", 16);
     
     data.mqtt.port=1883;
     
-    strncpy(&(data.mqtt.username[0]), "mqtt_username", 16);
-    strncpy(&(data.mqtt.password[0]), "mqtt_password", 16);
+    strncpy(&(data.mqtt.username[0]), "mqtt_user", 16);
+    strncpy(&(data.mqtt.password[0]), "mqtt_pass", 16);
     strncpy(&(data.mqtt.in_topic[0]), "sensors/in/pluviometer", 64);
     strncpy(&(data.mqtt.out_topic[0]), "sensors/out/pluviometer", 64);
 
@@ -188,12 +201,62 @@ void setup_mqtt_client() {
     client.setServer(&(data.mqtt.ip[0]), data.mqtt.port);
     client.setCallback(callback);    
     client.subscribe(&(data.mqtt.in_topic[0]));    
+
+    // send configuration to homeassistant
+
+    reconnectMqtt();
+
+    DynamicJsonDocument doc1(256);
+    DynamicJsonDocument doc2(256);
+    DynamicJsonDocument doc3(256);
+    
+    String serialized1Json = "";
+    String serialized2Json = "";
+    String serialized3Json = "";
+
+    
+    doc1["uniq_id"]="b8b4310a-40c9-46cb-952c-5ce401886798";
+    doc1["name"]="Pluviometer Precipitation";
+    doc1["stat_t"]=&(data.mqtt.out_topic[0]);
+    doc1["avty_t"]=&(data.mqtt.out_topic[0]);
+    doc1["unit_of_meas"]="mm/m²";
+    doc1["avty_tpl"]="{{value_json.status}}";
+    doc1["val_tpl"]="{{value_json.mm_per_sqm}}";
+        
+    serializeJson(doc1, serialized1Json);
+    Serial.println(serialized1Json);
+    client.publish("homeassistant/sensor/b8b4310a-40c9-46cb-952c-5ce401886798/config", serialized1Json.c_str(),true);
+    
+    doc2["uniq_id"]="58a93457-78ac-4d59-ac79-020e1b788c0d";
+    doc2["name"]="Pluviometer Battery";
+    doc2["stat_t"]=&(data.mqtt.out_topic[0]);
+    doc2["avty_t"]=&(data.mqtt.out_topic[0]);
+    doc2["unit_of_meas"]= "%";
+    doc2["avty_tpl"]="{{value_json.status}}";
+    doc2["val_tpl"]="{{value_json.voltage}}";
+
+    serializeJson(doc2, serialized2Json);
+    Serial.println(serialized2Json);
+    client.publish("homeassistant/sensor/58a93457-78ac-4d59-ac79-020e1b788c0d/config", serialized2Json.c_str(), true);
+    
+    doc3["uniq_id"]="be2dffe9-8459-46ad-89e6-9ca810924129";
+    doc3["name"]="Pluviometer is raining";
+    doc3["stat_t"]=&(data.mqtt.out_topic[0]);
+    doc3["avty_t"]=&(data.mqtt.out_topic[0]);
+    doc3["avty_tpl"]="{{value_json.status}}";
+    doc3["val_tpl"]="{{value_json.raining}}";
+        
+    serializeJson(doc3, serialized3Json);
+    Serial.println(serialized3Json);
+    client.publish("homeassistant/binary_sensor/be2dffe9-8459-46ad-89e6-9ca810924129/config", serialized3Json.c_str(),true);    
 }
 
 /**
  * Setup app after wake up
  */
 void setup() {
+  pinMode(rainStarted, INPUT_PULLUP);
+  
   // put your main code here, to run repeatedly:
   Serial.begin(115200);
   Serial.setTimeout(2000);
@@ -223,7 +286,7 @@ void setup() {
 
 
 /* PI * 5^2 cm */
-#define COLLECTOR_SURFACE 78,539816339744830961566084581988
+#define COLLECTOR_SURFACE 78.539816339744830961566084581988
 #define SQARE_METER_IN_SQUARE_CENTIMETERS 10000
 
 /* The bucket volume in ml */
@@ -233,12 +296,26 @@ void setup() {
  * Attempt mqtt transmission of data
  */
 void transmitToMQTT() {
+    // read the analog in value
+    voltage = analogRead(analogInPin);
+    double dvoltage = (voltage*3.3)/1024;
+
+    Serial.print("Voltage values (int, double) : (");
+    Serial.print(voltage);
+    Serial.print(", ");
+    Serial.print(dvoltage);
+    Serial.println(")");
+    
     /* calculates the mm/L per square meter equivalent */
-    DynamicJsonDocument doc(64);
+    DynamicJsonDocument doc(128);
+
+    double mm_per_sqm = (BUCKET_VOLUME_PER_TICK * SQARE_METER_IN_SQUARE_CENTIMETERS) / (COLLECTOR_SURFACE * 1000);
+    
     doc["ticks"]=data.ticks;
-    doc["mm_per_sqm"]=BUCKET_VOLUME_PER_TICK * SQARE_METER_IN_SQUARE_CENTIMETERS / COLLECTOR_SURFACE;
+    doc["mm_per_sqm"] = mm_per_sqm * data.ticks;
     doc["timestamp"]=timeClient.getEpochTime();
     doc["status"]="online";
+    doc["voltage"]=100*dvoltage/3.3;
     doc["raining"]=data.is_raining;
     
     String serializedJson = "";
@@ -282,6 +359,8 @@ void loop() {
   
   // increment the tickets and store into eeprom
   data.ticks++;
+  data.is_raining = (digitalRead(rainStarted) == 1);
+  
   saveDataAndConfiguration();
 
   // mqtt get messages
@@ -294,8 +373,12 @@ void loop() {
   transmitToMQTT();
 
   client.loop();
+  long sleep = random(0xffff) * 10000 + 5000000;
   
   // Deep sleep mode for 30 seconds, the ESP8266 wakes up by itself when GPIO 16 (D0 in NodeMCU board) is connected to the RESET pin
-  Serial.println("I'm awake, but I'm going into deep sleep mode for 30 seconds");
-  ESP.deepSleep(30e6); 
+  Serial.print("I'm awake, but I'm going into deep sleep mode for ");
+  Serial.print(sleep/1000000);
+  Serial.println (" seconds");
+  //65 000 000
+  ESP.deepSleep(sleep); 
 }
